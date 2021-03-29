@@ -1,9 +1,8 @@
-import os
 
 from flask import json
 
 from managers.step import StepManager
-from managers.balance import BalanceManager
+from managers.account import AccountBalanceManager
 
 
 class ProcessController:
@@ -11,7 +10,7 @@ class ProcessController:
     def __init__(self):
         self.data = None
         self.step_manager = StepManager()
-        self.balance_manager = BalanceManager()
+        self.account_balance_manager = AccountBalanceManager()
         self.log = ""
 
     def _validate_and_load_json_file(self, json_file_url):
@@ -35,9 +34,36 @@ class ProcessController:
             return None
 
     def read_file_and_process(self, json_url):
+        """
+        Read the json file from the given url and then start the process.
+        :param json_url: str, the url of the json file.
+        :return: str, the result log.
+        """
         if self._validate_and_load_json_file(json_file_url=json_url):
             self._process()
         return self.log
+
+    def _initialize_account(self, account_params):
+        """
+        Init the account information for the user.
+        :param account_params: dict, the user_id and pin information to create the account.
+        :return: bool, the process result.
+        """
+        try:
+            if account_params and 'user_id' in account_params and 'pin' in account_params:
+                self.account_balance_manager.create_account(
+                    user_id=account_params['user_id'],
+                    pin=account_params['pin'],
+                )
+                self.log += "\n Account has been created for the user with ID: {}".format(
+                    account_params['user_id'])
+                return True
+
+            self.log += "\n\n Account creation error, missing information."
+            return False
+
+        except Exception as e:
+            self.log += "\n\nThere was an error during the account creation. Error: {}".format(e)
 
     def _process(self):
         """
@@ -52,10 +78,12 @@ class ProcessController:
                 # Get trigger event
                 trigger = self.data['trigger']
                 self.step_manager.insert_one(trigger)
-                process_result = self._process_step(trigger['id'])
+                if self._initialize_account(trigger.get('params')):
+                    self._process_step(trigger['id'])
 
-                # Clear Step collection for tests proposal.
+                # Clear collections for testing.
                 self.step_manager.clear_collection()
+                self.account_balance_manager.clear_collection()
 
                 return self.log
 
@@ -64,46 +92,57 @@ class ProcessController:
         except Exception as e:
             self.log += "\n\nThere was an error during the process. Error: {}".format(e)
 
-    def _process_step(self, step_id):
+    def _process_step(self, step_id, condition=None):
         """
         Recursive function to manage every step according to the step_id.
         :param step_id: str, the id of the step to process.
         :return: Bool, when the process be finished.
         """
         try:
-            target = None
             current_step = self.step_manager.get_by_id(step_id=step_id)
-            self.log += "\n\n  *  Processing step:  ID: {},  Action: {}.".format(
-                step_id, current_step.get('action', "--"))
+            self.log += "\n\n  ***  Processing step with ID: {} ***".format(step_id)
 
             # Perform action
             if current_step.get('action'):
-                self._manage_action(action=current_step['action'])
+                if condition:
+                    self.log += "\n -- Validating condition: {}".format(condition)
+
+                result_step_action = self._manage_action(
+                    action=current_step['action'],
+                    params=current_step.get('params'),
+                    condition=condition
+                )
+                self.log += "\n - Action result: {}".format(result_step_action)
+                if condition:
+                    return result_step_action
 
             transitions = current_step.get('transitions')
             if transitions:
-                self.log += "\n({}) Transitions.".format(len(transitions))
                 transitions_counter = 1
                 for transition in transitions:
-                    self.log += "\n - Transition #{}:".format(transitions_counter)
+                    self.log += "\n\n - Transition ({}/{}):".format(transitions_counter, len(transitions))
                     transitions_counter += 1
-
+                    valid_conditions = True
                     if transition.get('condition'):
-                        # Manage condition here.
-                        self.log += "\nConditions: {}".format(transition['condition'])
+                        self.log += "\n\n Conditions:"
+                        for condition in transition['condition']:
+                            condition_result = self._process_step(
+                                step_id=condition.get('from_id'),
+                                condition=condition
+                            )
+                            self.log += "\n - Condition result: {}".format(condition_result)
+                            if condition_result is None:
+                                valid_conditions = False
                     else:
-                        self.log += "\nNo conditions."
+                        self.log += "\n  No conditions."
 
-                    if transition.get('target'):
-                        self.log += "\nTarget: {}".format(transition['target'])
-                        target = transition['target']
+                    if transition.get('target') and valid_conditions:
+                        self.log += "\n - Target: {}".format(transition['target'])
+                        return self._process_step(step_id=transition['target'])
                     else:
-                        self.log += "\nNo target."
+                        self.log += "\n  No target or invalid condition."
 
             self.log += "\nEnd process step {}.".format(step_id)
-
-            if target:
-                return self._process_step(step_id=target)
 
             return True
 
@@ -111,7 +150,7 @@ class ProcessController:
             self.log += "\n\nError while processing step with id: {}. Error: {}".format(step_id, e)
             return None
 
-    def _manage_action(self, action):
+    def _manage_action(self, action, params, condition):
         """
         Manage the action to perform by step.
         :param action: str, the action name.
@@ -119,7 +158,38 @@ class ProcessController:
         """
         try:
             self.log += "\n -  Doing action: {}".format(action)
-            return True
+            function_params, cond = {}, {}
+
+            if condition:
+                function_params[condition['field_id']] = {
+                    "${}".format(condition['operator']): condition['value']
+                }
+
+            if params:
+                for param, data in params.items():
+                    function_params[param] = self._get_param_value_from_step_id(
+                        step_id=data.get('from_id'),
+                        param_value=data.get('param_id')
+                    ) if data.get('from_id') else data.get('value')
+
+                self.log += "\n - Parameters: {}".format(function_params)
+
+            action_to_perform = getattr(self.account_balance_manager, action)
+            action_result = action_to_perform(function_params)
+            return action_result
 
         except Exception as e:
             self.log += "\n\nError while processing action: {}. Error: {}".format(action, e)
+
+    def _get_param_value_from_step_id(self, step_id, param_value):
+        """
+        Load parameters from given step.
+        :param step_id: str, the step id to load.
+        :param param_value: str, the param to load.
+        :return: param value.
+        """
+        step = self.step_manager.get_by_id(step_id=step_id)
+        if step and 'params' in step and param_value in step['params']:
+            return step['params'][param_value]
+
+        return None

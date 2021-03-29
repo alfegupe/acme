@@ -1,17 +1,11 @@
 import os
 
-from acme import create_app
-from flask import Flask, request, render_template, redirect, url_for, render_template_string
+from flask import request, render_template, redirect, url_for, render_template_string
 
 from controllers.process import ProcessController
-from utils import allowed_file
-
-# mongo = PyMongo()
-# app = Flask(__name__)
-# app.config["MONGO_URI"] = MONGO_URI
-# app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-# mongo.init_app(app)
+from utils.utils import allowed_file
 from acme import create_app
+
 app = create_app()
 
 
@@ -44,7 +38,6 @@ def process_file():
 
     json_url = os.path.join(app.config['UPLOAD_FOLDER'], filename)
     process_result_log = ProcessController().read_file_and_process(json_url)
-    print(process_result_log or "")
     return render_template_string(process_result_log.replace('\n', '<br>'))
 
 
